@@ -12,6 +12,11 @@ def haversine_dist(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
+def _is_us_coordinate(lat, lng):
+    """Return True if the coordinate is within the contiguous United States."""
+    return 24.5 <= lat <= 49.5 and -125.0 <= lng <= -66.5
+
+
 def geocode_address(address):
     """
     Geocodes an address to (lat, lng) using ORS.
@@ -35,7 +40,9 @@ def geocode_address(address):
                 if features:
                     coords = features[0]['geometry']['coordinates']
                     # ORS returns [lng, lat]
-                    return coords[1], coords[0]
+                    lat, lng = coords[1], coords[0]
+                    if _is_us_coordinate(lat, lng):
+                        return lat, lng
         except Exception:
             pass
 
@@ -54,7 +61,12 @@ def geocode_address(address):
         if response.status_code == 200:
             data = response.json()
             if data:
-                return float(data[0]['lat']), float(data[0]['lon'])
+                first = data[0]
+                lat = float(first['lat'])
+                lon = float(first['lon'])
+                country_code = first.get('country_code', '').lower()
+                if country_code == 'us' or _is_us_coordinate(lat, lon):
+                    return lat, lon
     except Exception:
         pass
 
@@ -74,8 +86,8 @@ def geocode_address(address):
         if key in normalized:
             return val
 
-    # Default to center of US if completely unknown
-    return 39.8283, -98.5795
+    # Unknown location: do not silently fallback to a generic US center.
+    return None
 
 def get_route(start_addr, finish_addr):
     """
@@ -84,8 +96,16 @@ def get_route(start_addr, finish_addr):
         route_points: list of (lat, lng) coordinates
         cumulative_distances: list of cumulative distances in miles
     """
-    start_lat, start_lng = geocode_address(start_addr)
-    finish_lat, finish_lng = geocode_address(finish_addr)
+    start_coords = geocode_address(start_addr)
+    finish_coords = geocode_address(finish_addr)
+
+    if not start_coords:
+        raise ValueError(f"Unable to geocode start address: '{start_addr}'.")
+    if not finish_coords:
+        raise ValueError(f"Unable to geocode finish address: '{finish_addr}'.")
+
+    start_lat, start_lng = start_coords
+    finish_lat, finish_lng = finish_coords
     
     api_key = getattr(settings, 'ORS_API_KEY', '')
     

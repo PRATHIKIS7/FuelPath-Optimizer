@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FuelPath Optimizer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f4f7fb;
+            color: #2d3a4f;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 28px;
+        }
+        h1 {
+            margin-bottom: 12px;
+            color: #1d2a4f;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 12px 26px rgba(20, 30, 60, 0.08);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        label {
+            display: block;
+            margin: 14px 0 6px;
+            font-weight: 600;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px 14px;
+            border-radius: 8px;
+            border: 1px solid #d3d9e6;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        button {
+            margin-top: 18px;
+            padding: 12px 22px;
+            border: none;
+            border-radius: 8px;
+            background: #2b6cb0;
+            color: white;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.65;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 16px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.5;
+        }
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+            margin-top: 18px;
+        }
+        .summary-card {
+            background: #f5f8ff;
+            border: 1px solid #dfe8ff;
+            padding: 16px;
+            border-radius: 10px;
+        }
+        .summary-card strong {
+            display: block;
+            margin-bottom: 8px;
+            color: #1f3a72;
+        }
+        .fuel-stop {
+            border-bottom: 1px solid #e3e8f0;
+            padding: 14px 0;
+        }
+        .fuel-stop:last-child {
+            border-bottom: none;
+        }
+        .fuel-stop h4 {
+            margin: 0 0 6px;
+            font-size: 1rem;
+            color: #1f3a72;
+        }
+        .fuel-stop p {
+            margin: 3px 0;
+            color: #4a5568;
+        }
+        #map {
+            height: 420px;
+            border-radius: 12px;
+            border: 1px solid #dfe8ff;
+            margin-top: 18px;
+        }
+        .footer {
+            margin-top: 32px;
+            color: #718096;
+            font-size: 0.95rem;
+        }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>FuelPath Optimizer</h1>
+            <p>Enter a start and end location, then click "Calculate Route" to test the project.</p>
+            <form id="route-form">
+                <label for="start">Start location</label>
+                <input id="start" name="start" type="text" placeholder="e.g. New York, NY" required />
+
+                <label for="finish">Finish location</label>
+                <input id="finish" name="finish" type="text" placeholder="e.g. Boston, MA" required />
+
+                <button id="submit-btn" type="submit">Calculate Route</button>
+            </form>
+        </div>
+
+        <div class="card" id="output-card" style="display:none;">
+            <h2>Route Summary</h2>
+            <div id="summary" class="summary"></div>
+            <h3>Warnings</h3>
+            <div id="warnings" class="result"></div>
+            <h3>Route Map</h3>
+            <div id="map"></div>
+            <h3>Fuel Stops</h3>
+            <div id="stops"></div>
+        </div>
+
+        <div class="footer">
+            <p>Note: This page uses the same Django app backend and calls <code>/api/route/?start=...&finish=...</code>.</p>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('route-form');
+        const outputCard = document.getElementById('output-card');
+        const summaryEl = document.getElementById('summary');
+        const stopsEl = document.getElementById('stops');
+        const submitBtn = document.getElementById('submit-btn');
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            submitBtn.disabled = true;
+            outputCard.style.display = 'none';
+            summaryEl.innerHTML = '';
+            stopsEl.innerHTML = '';
+
+            const start = document.getElementById('start').value.trim();
+            const finish = document.getElementById('finish').value.trim();
+            const warningsEl = document.getElementById('warnings');
+            warningsEl.textContent = '';
+
+            if (!start || !finish) {
+                warningsEl.textContent = 'Please provide both start and finish locations.';
+                outputCard.style.display = 'block';
+                submitBtn.disabled = false;
+                return;
+            }
+
+            try {
+                const url = `/api/route/?start=${encodeURIComponent(start)}&finish=${encodeURIComponent(finish)}`;
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    const warningsEl = document.getElementById('warnings');
+                    warningsEl.textContent = data.error || 'Request failed';
+                    outputCard.style.display = 'block';
+                    submitBtn.disabled = false;
+                    return;
+                }
+
+                summaryEl.innerHTML = `
+                    <div class="summary-card">
+                        <strong>Total miles</strong>
+                        <span>${data.total_miles.toFixed(1)} mi</span>
+                    </div>
+                    <div class="summary-card">
+                        <strong>Total fuel</strong>
+                        <span>${data.total_gallons_consumed.toFixed(2)} gal</span>
+                    </div>
+                    <div class="summary-card">
+                        <strong>Fuel cost</strong>
+                        <span>$${data.total_fuel_cost_usd.toFixed(2)}</span>
+                    </div>
+                `;
+
+                if (Array.isArray(data.fuel_stops) && data.fuel_stops.length) {
+                    stopsEl.innerHTML = data.fuel_stops.map((stop, index) => `
+                        <div class="fuel-stop">
+                            <h4>${index + 1}. ${stop.station_name || 'Station'}</h4>
+                            <p><strong>Address:</strong> ${stop.address}, ${stop.city}, ${stop.state}</p>
+                            <p><strong>Distance from start:</strong> ${stop.distance_from_start_miles.toFixed(1)} mi</p>
+                            <p><strong>Leg miles:</strong> ${stop.leg_miles.toFixed(1)} mi</p>
+                            <p><strong>Price:</strong> $${stop.fuel_price.toFixed(2)} / gal</p>
+                        </div>
+                    `).join('');
+                } else {
+                    stopsEl.textContent = 'No fuel stops were suggested by the API.';
+                }
+
+                const warningsEl = document.getElementById('warnings');
+                if (Array.isArray(data.warnings) && data.warnings.length) {
+                    warningsEl.innerHTML = data.warnings.map(w => `<div>${w}</div>`).join('');
+                } else {
+                    warningsEl.textContent = 'No warnings.';
+                }
+
+                outputCard.style.display = 'block';
+                renderRouteOnMap(data);
+            } catch (error) {
+                const warningsEl = document.getElementById('warnings');
+                warningsEl.textContent = `Error: ${error.message}`;
+                outputCard.style.display = 'block';
+            } finally {
+                submitBtn.disabled = false;
+            }
+        });
+
+        let map;
+        let routeLayer;
+        const stopMarkers = [];
+
+        function initMap() {
+            if (map) {
+                return;
+            }
+
+            map = L.map('map').setView([39.8283, -98.5795], 4);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+
+            routeLayer = L.geoJSON(null, {
+                style: {
+                    color: '#2b6cb0',
+                    weight: 5,
+                    opacity: 0.8
+                }
+            }).addTo(map);
+        }
+
+        function renderRouteOnMap(data) {
+            if (!data || !data.route_geometry || !Array.isArray(data.route_geometry.coordinates)) {
+                return;
+            }
+
+            initMap();
+            routeLayer.clearLayers();
+            stopMarkers.forEach(marker => map.removeLayer(marker));
+            stopMarkers.length = 0;
+
+            const routeGeoJSON = {
+                type: 'Feature',
+                geometry: data.route_geometry
+            };
+
+            routeLayer.addData(routeGeoJSON);
+
+            const bounds = routeLayer.getBounds();
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, {padding: [40, 40]});
+            }
+
+            if (Array.isArray(data.fuel_stops)) {
+                data.fuel_stops.forEach((stop, index) => {
+                    if (typeof stop.latitude === 'number' && typeof stop.longitude === 'number') {
+                        const marker = L.marker([stop.latitude, stop.longitude]).addTo(map);
+                        marker.bindPopup(
+                            `<strong>${index + 1}. ${stop.station_name || 'Fuel Stop'}</strong><br/>` +
+                            `${stop.address}, ${stop.city}, ${stop.state}<br/>` +
+                            `Price: $${stop.fuel_price.toFixed(2)} / gal<br/>` +
+                            `Distance: ${stop.distance_from_start_miles.toFixed(1)} mi`
+                        );
+                        stopMarkers.push(marker);
+                    }
+                });
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</body>
+</html>

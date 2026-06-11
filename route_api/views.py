@@ -1,21 +1,34 @@
+from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from route_api.services.routing import get_route
 from route_api.services.fuel import plan_fuel_stops
 
+
+def home(request):
+    return render(request, 'route_api/index.html')
+
+
 class RouteView(APIView):
+    authentication_classes = []
+    permission_classes = []
     """
     API endpoint that accepts start and end locations,
     computes the optimal driving route, and plans the most cost-effective fuel stops.
     """
     def get(self, request, *args, **kwargs):
-        start = request.query_params.get('start')
-        finish = request.query_params.get('finish')
+        start = request.query_params.get('start') or request.GET.get('start')
+        finish = request.query_params.get('finish') or request.GET.get('finish')
         
         if not start or not finish:
             return Response(
-                {"error": "Both 'start' and 'finish' query parameters are required."},
+                {
+                    "error": "Both 'start' and 'finish' query parameters are required.",
+                    "received_start": start,
+                    "received_finish": finish,
+                    "query_string": request.META.get('QUERY_STRING', '')
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
             
@@ -60,7 +73,8 @@ class RouteView(APIView):
                         "leg_cost": stop['leg_cost']
                     }
                     for stop in result['fuel_stops']
-                ]
+                ],
+                "warnings": result.get('warnings', [])
             }
             
             return Response(response_data, status=status.HTTP_200_OK)

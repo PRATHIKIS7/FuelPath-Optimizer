@@ -6,156 +6,198 @@ def haversine(lat1, lon1, lat2, lon2):
     Calculate the great circle distance between two points 
     on the earth (specified in decimal degrees) in miles.
     """
-    # Earth radius in miles
     R = 3958.8
-    
     d_lat = math.radians(lat2 - lat1)
     d_lon = math.radians(lon2 - lon1)
-    
     a = (math.sin(d_lat / 2) ** 2 +
          math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lon / 2) ** 2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    
     return R * c
 
-def project_stations_to_route(route_points, cumulative_distances, max_off_route_miles=5.0):
+
+def _route_bounding_box(route_points, buffer_degrees=0.25):
+    lats = [pt[0] for pt in route_points]
+    lngs = [pt[1] for pt in route_points]
+    return (
+        min(lats) - buffer_degrees,
+        max(lats) + buffer_degrees,
+        min(lngs) - buffer_degrees,
+        max(lngs) + buffer_degrees,
+    )
+
+
+def _build_coarse_points(route_points, target_coarse_points=500):
+    num_points = len(route_points)
+    downsample_factor = max(1, num_points // target_coarse_points)
+    indices = list(range(0, num_points, downsample_factor))
+    if not indices or indices[-1] != num_points - 1:
+        indices.append(num_points - 1)
+    return [(route_points[idx], idx) for idx in indices]
+
+
+def _closest_route_point_for_station(station, route_points, coarse_points):
+    min_coarse_dist = float('inf')
+    best_coarse_idx = 0
+    for pt, original_idx in coarse_points:
+        dist = haversine(station.latitude, station.longitude, pt[0], pt[1])
+        if dist < min_coarse_dist:
+            min_coarse_dist = dist
+            best_coarse_idx = original_idx
+
+    num_points = len(route_points)
+    downsample_factor = max(1, num_points // len(coarse_points))
+    start_search = max(0, best_coarse_idx - downsample_factor)
+    end_search = min(num_points, best_coarse_idx + downsample_factor + 1)
+
+    min_dist = float('inf')
+    closest_idx = best_coarse_idx
+    for idx in range(start_search, end_search):
+        pt = route_points[idx]
+        dist = haversine(station.latitude, station.longitude, pt[0], pt[1])
+        if dist < min_dist:
+            min_dist = dist
+            closest_idx = idx
+
+    return closest_idx, min_dist
+
+
+def project_stations_to_route(route_points, cumulative_distances, max_off_route_miles=5.0, max_search_radius_miles=30.0):
     """
-    Finds all stations within bounding box of the route, projects them onto the route
-    by finding the nearest route point, and returns a list of stations with their route mile markers.
-    Uses a coarse-to-fine search algorithm to support routes with tens of thousands of points efficiently.
+    Finds stations near the route and projects them onto the closest route point.
+    Uses a coarse-to-fine search and optionally widens the corridor for rural paths.
     """
     if not route_points:
         return []
 
-    # Get bounding box of the route (with 0.1 degree buffer, ~7 miles)
-    lats = [pt[0] for pt in route_points]
-    lngs = [pt[1] for pt in route_points]
-    
-    min_lat, max_lat = min(lats) - 0.1, max(lats) + 0.1
-    min_lng, max_lng = min(lngs) - 0.1, max(lngs) + 0.1
-
-    # Filter stations in DB within bounding box
+    min_lat, max_lat, min_lng, max_lng = _route_bounding_box(route_points, buffer_degrees=max_off_route_miles / 69.0)
     stations_in_bbox = FuelStation.objects.filter(
         latitude__range=(min_lat, max_lat),
         longitude__range=(min_lng, max_lng)
-    )
+    ).exclude(latitude__isnull=True, longitude__isnull=True)
 
     projected_stations = []
-    
-    # Determine downsample factor for coarse search
-    # Target about 500 points for coarse search
-    num_points = len(route_points)
-    target_coarse_points = 500
-    downsample_factor = max(1, num_points // target_coarse_points)
-    
-    coarse_indices = list(range(0, num_points, downsample_factor))
-    # Ensure the last point is included
-    if not coarse_indices or coarse_indices[-1] != num_points - 1:
-        coarse_indices.append(num_points - 1)
-
-    # Pre-fetch coarse points
-    coarse_points = [(route_points[idx], idx) for idx in coarse_indices]
+    coarse_points = _build_coarse_points(route_points)
 
     for station in stations_in_bbox:
-        # Step 1: Find the closest point in the coarse set
-        min_coarse_dist = float('inf')
-        best_coarse_idx = -1
-        
-        for pt, original_idx in coarse_points:
-            dist = haversine(station.latitude, station.longitude, pt[0], pt[1])
-            if dist < min_coarse_dist:
-                min_coarse_dist = dist
-                best_coarse_idx = original_idx
-                
-        # Step 2: Search in the local neighborhood of the best coarse point
-        # Define search window around the best coarse index
-        start_search = max(0, best_coarse_idx - downsample_factor)
-        end_search = min(num_points, best_coarse_idx + downsample_factor + 1)
-        
-        min_dist = float('inf')
-        closest_idx = -1
-        
-        for idx in range(start_search, end_search):
-            pt = route_points[idx]
-            dist = haversine(station.latitude, station.longitude, pt[0], pt[1])
-            if dist < min_dist:
-                min_dist = dist
-                closest_idx = idx
-                
-        # If the closest point is within the threshold, project the station
+        closest_idx, min_dist = _closest_route_point_for_station(station, route_points, coarse_points)
         if min_dist <= max_off_route_miles:
             projected_stations.append({
                 'station': station,
                 'mile_marker': cumulative_distances[closest_idx],
                 'off_route_distance': min_dist
             })
-            
-    # Sort projected stations by their position along the route
+
     projected_stations.sort(key=lambda x: x['mile_marker'])
+
+    if not projected_stations and max_off_route_miles < max_search_radius_miles:
+        return project_stations_to_route(
+            route_points,
+            cumulative_distances,
+            max_off_route_miles=max_search_radius_miles,
+            max_search_radius_miles=max_search_radius_miles
+        )
+
     return projected_stations
+
+
+def _estimate_fallback_price(projected):
+    if projected:
+        return min(projected, key=lambda x: x['station'].price)['station'].price
+
+    fallback_station = FuelStation.objects.exclude(
+        latitude__isnull=True,
+        longitude__isnull=True
+    ).order_by('price').first()
+    return fallback_station.price if fallback_station else 3.50
+
 
 def plan_fuel_stops(route_points, cumulative_distances, max_range_miles=500.0, mpg=10.0):
     """
     Applies the greedy fuel stop selection algorithm.
     - Start at mile 0 with a full tank (500-mile range).
-    - Find cheapest station in the next 500 miles.
+    - Find the cheapest station in the next 500 miles.
     - Stop there, refill, and repeat.
     """
     total_miles = cumulative_distances[-1] if cumulative_distances else 0.0
     total_gallons = total_miles / mpg
-    
-    # Project all stations onto the route
+    warnings = []
+
     projected = project_stations_to_route(route_points, cumulative_distances)
-    
-    stops = []
-    current_mile = 0.0
-    
-    # If the total route is less than the max range, we can reach without stops.
+    if not projected:
+        warnings.append(
+            'No stations found within 5 miles of the route. Expanding search to 30 miles.'
+        )
+        projected = project_stations_to_route(route_points, cumulative_distances, max_off_route_miles=30.0)
+
     if total_miles <= max_range_miles:
-        # We don't need any stops, but we still need to calculate the fuel cost.
-        # Find the cheapest station along the entire route to calculate the cost.
-        if projected:
-            cheapest = min(projected, key=lambda x: x['station'].price)
-            price = cheapest['station'].price
-        else:
-            price = 3.50 # Default fallback price if no stations are found along route
-        
+        price = _estimate_fallback_price(projected)
         total_cost = total_gallons * price
         return {
             'fuel_stops': [],
             'total_miles': round(total_miles, 2),
             'total_gallons': round(total_gallons, 2),
-            'total_fuel_cost': round(total_cost, 2)
+            'total_fuel_cost': round(total_cost, 2),
+            'warnings': warnings
         }
 
+    if not projected:
+        price = _estimate_fallback_price(projected)
+        warnings.append(
+            'Unable to locate fuel stations near the route. Fuel cost is estimated using a fallback price.'
+        )
+        total_cost = total_gallons * price
+        return {
+            'fuel_stops': [],
+            'total_miles': round(total_miles, 2),
+            'total_gallons': round(total_gallons, 2),
+            'total_fuel_cost': round(total_cost, 2),
+            'warnings': warnings
+        }
+
+    stops = []
+    current_mile = 0.0
     total_cost = 0.0
-    
-    # Loop until the remaining distance to the destination is within max range
+
     while current_mile + max_range_miles < total_miles:
-        # Find all stations within the search window: (current_mile, current_mile + max_range_miles]
         candidates = [
-            p for p in projected 
+            p for p in projected
             if current_mile < p['mile_marker'] <= current_mile + max_range_miles
         ]
-        
+
         if not candidates:
-            # If no stations are in range, look for any station that is ahead and closest to our limit
-            # so we can at least make progress, or fail gracefully.
-            # Here we raise a ValueError to indicate it's impossible to complete the route.
-            raise ValueError(
-                f"No fuel stations found within the {max_range_miles}-mile range from mile marker {round(current_mile, 1)}."
+            candidates = [
+                p for p in projected
+                if p['mile_marker'] > current_mile
+            ]
+            if candidates:
+                warnings.append(
+                    'No station was found within the ideal 500-mile range; selecting the next available station ahead.'
+                )
+                candidates.sort(key=lambda p: p['mile_marker'])
+                candidates = candidates[:10]
+
+        if not candidates:
+            warnings.append(
+                'Unable to continue planning fuel stops for this route; using estimated fuel cost instead.'
             )
-            
-        # Select the station with the lowest price
+            price = _estimate_fallback_price(projected)
+            total_cost = total_gallons * price
+            return {
+                'fuel_stops': stops,
+                'total_miles': round(total_miles, 2),
+                'total_gallons': round(total_gallons, 2),
+                'total_fuel_cost': round(total_cost, 2),
+                'warnings': warnings
+            }
+
         best_candidate = min(candidates, key=lambda x: x['station'].price)
         best_station = best_candidate['station']
         stop_mile = best_candidate['mile_marker']
-        
-        # Calculate fuel consumed for this leg
+
         leg_miles = stop_mile - current_mile
         leg_gallons = leg_miles / mpg
         leg_cost = leg_gallons * best_station.price
-        
+
         stops.append({
             'name': best_station.name,
             'address': best_station.address,
@@ -169,30 +211,25 @@ def plan_fuel_stops(route_points, cumulative_distances, max_range_miles=500.0, m
             'leg_gallons': round(leg_gallons, 2),
             'leg_cost': round(leg_cost, 2)
         })
-        
+
         total_cost += leg_cost
         current_mile = stop_mile
 
-    # Final leg: from the last stop to the destination
     final_leg_miles = total_miles - current_mile
     final_leg_gallons = final_leg_miles / mpg
-    
-    # The price of the fuel for the final leg is the price at the last stop
+
     if stops:
         last_price = stops[-1]['fuel_price']
     else:
-        # If no stops were made (should not happen since L > 500, but just in case)
-        if projected:
-            last_price = min(projected, key=lambda x: x['station'].price)['station'].price
-        else:
-            last_price = 3.50
-            
+        last_price = _estimate_fallback_price(projected)
+
     final_leg_cost = final_leg_gallons * last_price
     total_cost += final_leg_cost
-    
+
     return {
         'fuel_stops': stops,
         'total_miles': round(total_miles, 2),
         'total_gallons': round(total_gallons, 2),
-        'total_fuel_cost': round(total_cost, 2)
+        'total_fuel_cost': round(total_cost, 2),
+        'warnings': warnings
     }
